@@ -1,0 +1,24 @@
+[Unit]
+Description=Bandwidth Hero Proxy Server
+After=network.target
+
+[Service]
+Type=simple
+User=bandwidth
+Group=bandwidth
+WorkingDirectory=/opt/bandwidth-hero-proxy
+ExecStart=/opt/bandwidth-hero-proxy/bandwidth-hero-proxy
+Restart=always
+RestartSec=10
+Environment=PORT=3000
+Environment=LOG_LEVEL=info
+Environment=LOG_ENABLED=true
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,75 @@
+[package]
+name = "bandwidth-hero-proxy"
+version = "1.0.0"
+edition = "2021"
+description = "Data compression service that converts images to low-res WebP or JPEG on the fly"
+license = "MIT"
+
+[[bin]]
+name = "bandwidth-hero-proxy"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP server
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors", "compression-gzip"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Image processing
+image = { version = "0.25", features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
+jpeg-encoder = "0.6"
+ravif = { version = "0.11", optional = true }
+imgref = "1.10"
+rgb = "0.8"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Crypto for MD5 hash
+md-5 = "0.10"
+hex = "0.4"
+
+# URL parsing
+url = "2.5"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Base64 encoding
+base64 = "0.22"
+
+# Configuration
+dotenvy = "0.15"
+
+[features]
+default = ["avif", "parallel"]
+avif = ["dep:ravif"]
+parallel = ["image/rayon"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.release-fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 4
+
+# Optimize dependencies in debug mode too
+[profile.dev.package."*"]
+opt-level = 3
