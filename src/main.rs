@@ -152,7 +152,8 @@ fn parse_query_params(params: &CompressionQuery) -> Result<CompressionParams, St
         if !url.trim().is_empty() {
             return Ok(CompressionParams {
                 image_url: url.trim().to_string(),
-                is_webp: params.jpeg.as_ref().map(|v| v != "1").unwrap_or(true),
+                // jpeg=1 means client wants JPEG, otherwise they want WebP (we use AVIF for WebP)
+                is_webp: params.jpeg.as_ref().map(|v| v == "1").unwrap_or(false),
                 is_grayscale: params.bw.as_ref().map(|v| v == "1").unwrap_or(false),
                 quality: params
                     .l

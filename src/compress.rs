@@ -63,25 +63,28 @@ fn calculate_dimensions(
     )
 }
 
-/// Select the best output format based on image properties
+/// Select the best output format based on client request and image properties
 fn select_format(
     use_avif: bool,
     calculated_height: u32,
     config: &Config,
 ) -> ImageFormat {
+    // If client requested JPEG (use_avif = false), always use JPEG
+    if !use_avif {
+        return ImageFormat::Jpeg;
+    }
+
+    // Client requested WebP, use AVIF as the optimized format
+    // But fall back to JPEG if height exceeds limits
     if calculated_height > config.max_jpeg_height {
         return ImageFormat::Jpeg;
     }
 
-    if use_avif && calculated_height > config.max_avif_height {
+    if calculated_height > config.max_avif_height {
         return ImageFormat::Jpeg;
     }
 
-    if use_avif {
-        ImageFormat::Avif
-    } else {
-        ImageFormat::Jpeg
-    }
+    ImageFormat::Avif
 }
 
 /// Compress image to JPEG format
@@ -280,19 +283,18 @@ mod tests {
     }
 
     #[test]
-    fn test_select_format_height_limit() {
+    fn test_select_format_client_request() {
         let config = Config::default();
-        assert_eq!(
-            select_format(true, 40000, &config),
-            ImageFormat::Jpeg
-        );
-        assert_eq!(
-            select_format(true, 1000, &config),
-            ImageFormat::Avif
-        );
-        assert_eq!(
-            select_format(false, 1000, &config),
-            ImageFormat::Jpeg
-        );
+        
+        // Client requested JPEG (use_avif = false) → always JPEG
+        assert_eq!(select_format(false, 1000, &config), ImageFormat::Jpeg);
+        assert_eq!(select_format(false, 40000, &config), ImageFormat::Jpeg);
+        
+        // Client requested WebP (use_avif = true) → AVIF if within limits
+        assert_eq!(select_format(true, 1000, &config), ImageFormat::Avif);
+        
+        // Client requested WebP but height exceeds limits → fallback to JPEG
+        assert_eq!(select_format(true, 40000, &config), ImageFormat::Jpeg);
+        assert_eq!(select_format(true, 20000, &config), ImageFormat::Jpeg);
     }
 }
