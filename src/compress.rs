@@ -21,10 +21,10 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            max_width: 400,
+            max_width: 800,
             max_jpeg_height: 32767,
             max_avif_height: 16383,
-            grayscale_quality_range: (10, 40),
+            grayscale_quality_range: (15, 50),
         }
     }
 }
@@ -139,9 +139,12 @@ fn compress_avif(
         .map(|chunk| RGBA8::new(chunk[0], chunk[1], chunk[2], chunk[3]))
         .collect();
 
+    // Optimize AVIF encoding for better quality:
+    // - Quality value (0-100 scale)
+    // - Slower speed (0=slowest/best, 10=fastest/worst)
     let result = Encoder::new()
-        .with_quality(quality as f32)
-        .with_speed(4)
+        .with_quality((quality as f32).min(100.0))
+        .with_speed(2)  // Slower = better quality (was 4)
         .with_bit_depth(BitDepth::Eight)
         .with_alpha_color_mode(AlphaColorMode::UnassociatedDirty)
         .encode_rgba(imgref::Img::new(rgba_data.as_slice(), width as usize, height as usize))
@@ -277,9 +280,11 @@ mod tests {
 
     #[test]
     fn test_calculate_dimensions() {
-        assert_eq!(calculate_dimensions(800, 600, 400), (400, 300));
-        assert_eq!(calculate_dimensions(400, 300, 400), (400, 300));
-        assert_eq!(calculate_dimensions(200, 150, 400), (200, 150));
+        // With max_width = 800
+        assert_eq!(calculate_dimensions(1600, 1200, 800), (800, 600));
+        assert_eq!(calculate_dimensions(800, 600, 800), (800, 600));
+        assert_eq!(calculate_dimensions(400, 300, 800), (400, 300));
+        assert_eq!(calculate_dimensions(200, 150, 800), (200, 150));
     }
 
     #[test]
