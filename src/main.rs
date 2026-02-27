@@ -7,15 +7,16 @@ mod should_compress;
 
 use axum::{
     extract::{Query, State},
-    http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::Response,
     routing::get,
     Json, Router,
 };
+use curl_rest::{Client, Header as CurlHeader};
 use md5::{Digest, Md5};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::{net::SocketAddr, time::Duration};
+use std::{borrow::Cow, net::SocketAddr, sync::Arc, time::Duration};
+use tokio::sync::Semaphore;
 use tower_http::{
     compression::CompressionLayer,
     cors::{Any, CorsLayer},
@@ -31,7 +32,8 @@ use crate::should_compress::{should_compress, Config as CompressConfig};
 /// Application state shared across requests
 #[derive(Clone)]
 struct AppState {
-    http_client: Client,
+    http_client: Arc<Client<'static>>,
+    fetch_semaphore: Arc<Semaphore>,
     logger: Logger,
     config: ServerConfig,
 }
@@ -194,58 +196,69 @@ fn generate_url_hash(url: &str) -> String {
 async fn fetch_upstream_image(
     url: &str,
     headers: &HeaderMap,
-    client: &Client,
+    _client: &Arc<Client<'static>>,
     config: &ServerConfig,
+    semaphore: &Arc<Semaphore>,
 ) -> Result<UpstreamFetchResult, String> {
-    let fetch_headers = {
-        let mut h = HeaderMap::new();
+    // Pick relevant headers
+    let picked = pick(
+        &headers
+            .iter()
+            .filter_map(|(k, v)| v.to_str().ok().map(|vs| (k.as_str().to_string(), vs.to_string())))
+            .collect(),
+        &config.fetch_headers_to_pick,
+    );
 
-        // Pick relevant headers
-        let picked = pick(
-            &headers
-                .iter()
-                .filter_map(|(k, v)| v.to_str().ok().map(|vs| (k.as_str().to_string(), vs.to_string())))
-                .collect(),
-            &config.fetch_headers_to_pick,
-        );
+    // Acquire semaphore permit (limit 10 concurrent fetches)
+    let _permit = semaphore
+        .acquire()
+        .await
+        .map_err(|_| "Semaphore closed".to_string())?;
 
-        for (key, value) in picked {
-            if let Ok(val) = HeaderValue::from_str(&value) {
-                if let Ok(name) = HeaderName::from_bytes(key.as_bytes()) {
-                    h.insert(name, val);
-                }
-            }
+    // Add delay before fetch (0.4 seconds)
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // Retry logic: try up to 2 times
+    let mut last_error: Option<String> = None;
+
+    for _attempt in 0..2 {
+        // Build curl-rest client with headers (must be inside loop since Client is not Clone)
+        let mut curl_client = Client::<'static>::default();
+        for (key, value) in &picked {
+            curl_client = curl_client.header(CurlHeader::Custom(Cow::Owned(key.clone()), Cow::Owned(value.clone())));
         }
 
-        h
-    };
-
-    let response = client
-        .get(url)
-        .headers(fetch_headers)
-        .timeout(Duration::from_secs(8))
-        .send()
+        let url_string = url.to_string();
+        let result = tokio::task::spawn_blocking(move || {
+            curl_client.get().send(&url_string)
+        })
         .await
-        .map_err(|e| format!("Fetch error: {}", e))?;
+        .map_err(|e| format!("Join error: {}", e))?;
 
-    let status = response.status().as_u16();
-    let content_type = response
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
+        match result {
+            Ok(response) => {
+                let status = response.status.as_u16();
+                let content_type = response
+                    .headers
+                    .iter()
+                    .find(|h| h.name.eq_ignore_ascii_case("content-type"))
+                    .map(|h| h.value.clone())
+                    .unwrap_or_default();
 
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| format!("Read error: {}", e))?;
+                return Ok(UpstreamFetchResult {
+                    status,
+                    content_type,
+                    data: response.body,
+                });
+            }
+            Err(e) => {
+                last_error = Some(format!("Fetch error: {}", e));
+                // Will retry if this was the first attempt
+            }
+        }
+    }
 
-    Ok(UpstreamFetchResult {
-        status,
-        content_type,
-        data: bytes.to_vec(),
-    })
+    Err(last_error.unwrap_or_else(|| "Unknown fetch error".to_string()))
 }
 
 /// Result of upstream fetch
@@ -308,6 +321,7 @@ async fn compress_handler(
         &headers,
         &state.http_client,
         &state.config,
+        &state.fetch_semaphore,
     )
     .await
     .map_err(|e| {
@@ -449,25 +463,19 @@ async fn main() -> anyhow::Result<()> {
 
     let logger = Logger::new(&log_level, log_enabled);
 
-    logger.info("Starting Bandwidth Hero Proxy", &serde_json::json!({
-        "version": env!("CARGO_PKG_VERSION"),
-    }));
-
     // Create server configuration
     let config = ServerConfig::default();
 
-    // Create HTTP client with optimized connection pooling
-    let http_client = Client::builder()
-        .timeout(Duration::from_secs(8))
-        .pool_idle_timeout(Duration::from_secs(90))
-        .pool_max_idle_per_host(8)
-        .tcp_keepalive(Duration::from_secs(15))
-        .build()
-        .expect("Failed to create HTTP client");
+    // Create HTTP client with curl-rest
+    let http_client = Arc::new(Client::<'static>::default());
+
+    // Create semaphore for concurrent fetch limiting (10 parallel)
+    let fetch_semaphore = Arc::new(Semaphore::new(10));
 
     // Create application state
     let state = AppState {
         http_client,
+        fetch_semaphore,
         logger: logger.clone(),
         config: config.clone(),
     };
@@ -477,10 +485,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Bind address
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
+    let address = format!("0.0.0.0:{}", config.port);
 
-    logger.info("Server listening", &serde_json::json!({
-        "address": format!("0.0.0.0:{}", config.port),
-    }));
+    // Log startup with style
+    logger.log_startup(env!("CARGO_PKG_VERSION"), &address);
 
     // Start server
     let listener = tokio::net::TcpListener::bind(addr).await?;
